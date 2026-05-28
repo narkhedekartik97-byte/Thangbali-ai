@@ -873,6 +873,67 @@
         }
       }
 
+      /* ── Generation buttons ──────────────────────────────────── */
+      .gen-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 1.1rem;
+        padding: 6px;
+        border-radius: 8px;
+        flex-shrink: 0;
+        transition: color 0.15s, background 0.15s;
+        display: flex;
+        align-items: center;
+        line-height: 1;
+      }
+      .gen-btn:hover {
+        color: var(--text);
+        background: var(--surface2);
+      }
+
+      /* ── Generated media in chat ─────────────────────────────── */
+      .gen-media-wrap {
+        margin-top: 6px;
+      }
+      .gen-media-wrap img {
+        max-width: 100%;
+        border-radius: 10px;
+        display: block;
+        border: 1px solid var(--glass-border);
+      }
+      .gen-media-wrap video {
+        max-width: 100%;
+        border-radius: 10px;
+        display: block;
+        border: 1px solid var(--glass-border);
+      }
+      .gen-revised {
+        margin-top: 6px;
+        font-size: 0.72rem;
+        color: var(--muted2);
+        font-style: italic;
+      }
+      .gen-spinner {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 0 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .gen-spinner-ring {
+        width: 20px;
+        height: 20px;
+        border: 2.5px solid var(--glass-border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        flex-shrink: 0;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
       /* Responsive */
       @media (max-width: 700px) {
         #sidebar {
@@ -1017,9 +1078,11 @@
           <label id="upload-btn-label" title="Upload PDF">
             📎<input type="file" id="pdf-upload-input" accept=".pdf" />
           </label>
+          <button class="gen-btn" id="gen-image-btn" title="Generate Image (DALL-E 3)">🎨</button>
+          <button class="gen-btn" id="gen-video-btn" title="Generate Video (AI)">🎬</button>
           <textarea
             id="user-input"
-            placeholder="Message thangbali…"
+            placeholder="Message thangbali… or use 🎨 /image · 🎬 /video"
             rows="1"
           ></textarea>
           <button id="send-btn" title="Send" disabled>&#9658;</button>
@@ -1133,7 +1196,27 @@
             pdfBadge.classList.remove("visible");
           }
           chatWindow.innerHTML = "";
-          history.forEach(m => renderMessage(m.role === "user" ? "user" : "assistant", m.content, false));
+          history.forEach(m => {
+            const role = m.role === "user" ? "user" : "assistant";
+            if (m.content.startsWith("[IMAGE_GENERATED: ")) {
+              const prompt = m.content.slice(18, -1);
+              const img = document.createElement("img");
+              img.alt = prompt; img.style.cssText = "max-width:100%;border-radius:10px;opacity:0.55";
+              img.title = `Image prompt: ${prompt}`;
+              const placeholder = document.createElement("em");
+              placeholder.style.color = "var(--muted)";
+              placeholder.textContent = `🎨 Generated image: "${prompt}"`;
+              renderMessage(role, ""); // skip content — we'll append note
+              chatWindow.lastElementChild.querySelector(".bubble").appendChild(placeholder);
+            } else if (m.content.startsWith("[VIDEO_GENERATED: ")) {
+              const src = m.content.slice(18, -1);
+              const video = document.createElement("video");
+              video.src = src; video.controls = true;
+              renderMediaMessage("assistant", "", video, null);
+            } else {
+              renderMessage(role, m.content, false);
+            }
+          });
           chatWindow.scrollTop = chatWindow.scrollHeight;
           await renderHistory();
           closeSidebar();
@@ -1185,6 +1268,147 @@
         userInput.focus();
       }
       newChatBtn.addEventListener("click", startNewChat);
+
+      // ── Media generation ─────────────────────────────────────────
+      document.getElementById("gen-image-btn").addEventListener("click", () => {
+        userInput.value = "/image ";
+        userInput.dispatchEvent(new Event("input"));
+        userInput.focus();
+      });
+      document.getElementById("gen-video-btn").addEventListener("click", () => {
+        userInput.value = "/video ";
+        userInput.dispatchEvent(new Event("input"));
+        userInput.focus();
+      });
+
+      function renderMediaMessage(role, prompt, mediaEl, revisedPrompt) {
+        hideWelcome();
+        const group = document.createElement("div");
+        group.className = "msg-group";
+        const row = document.createElement("div");
+        row.className = `msg-row ${role}`;
+        if (role === "assistant") {
+          const av = document.createElement("div");
+          av.className = "avatar ai-av"; av.textContent = "✦";
+          row.appendChild(av);
+        }
+        const bubble = document.createElement("div");
+        bubble.className = "bubble" + (role === "assistant" ? " md" : "");
+
+        const wrap = document.createElement("div");
+        wrap.className = "gen-media-wrap";
+        wrap.appendChild(mediaEl);
+        if (revisedPrompt && revisedPrompt !== prompt) {
+          const note = document.createElement("div");
+          note.className = "gen-revised";
+          note.textContent = `Revised: "${revisedPrompt}"`;
+          wrap.appendChild(note);
+        }
+        bubble.appendChild(wrap);
+        row.appendChild(bubble);
+        group.appendChild(row);
+        chatWindow.appendChild(group);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+      }
+
+      async function generateImage(prompt) {
+        if (streaming) return;
+        streaming = true;
+        sendBtn.disabled = true;
+        userInput.value = ""; userInput.style.height = "auto"; charCount.textContent = "";
+
+        renderMessage("user", `/image ${prompt}`);
+        await ensureSession(`🎨 ${prompt.slice(0, 38)}`);
+
+        const spinGroup = renderSpinner("Generating image with DALL-E 3…");
+
+        try {
+          const res  = await fetch("/generate/image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt }),
+          });
+          const data = await res.json();
+          spinGroup.remove();
+          if (data.error) {
+            renderSystemNote(`⚠️ Image error: ${data.error}`);
+          } else {
+            const img = document.createElement("img");
+            img.src = data.image;
+            img.alt = prompt;
+            renderMediaMessage("assistant", prompt, img, data.revised_prompt);
+            await persistMessages([
+              { role: "user",      content: `/image ${prompt}` },
+              { role: "assistant", content: `[IMAGE_GENERATED: ${prompt}]` },
+            ]);
+          }
+        } catch {
+          spinGroup.remove();
+          renderSystemNote("⚠️ Network error during image generation.");
+        }
+
+        streaming = false;
+        sendBtn.disabled = !userInput.value.trim();
+        userInput.focus();
+      }
+
+      async function generateVideo(prompt) {
+        if (streaming) return;
+        streaming = true;
+        sendBtn.disabled = true;
+        userInput.value = ""; userInput.style.height = "auto"; charCount.textContent = "";
+
+        renderMessage("user", `/video ${prompt}`);
+        await ensureSession(`🎬 ${prompt.slice(0, 38)}`);
+
+        const spinGroup = renderSpinner("Generating video — this may take 30–90 seconds…");
+
+        try {
+          const res  = await fetch("/generate/video", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt }),
+          });
+          const data = await res.json();
+          spinGroup.remove();
+          if (data.error) {
+            renderSystemNote(`⚠️ Video error: ${data.error}`);
+          } else {
+            const video = document.createElement("video");
+            video.src = data.video; video.controls = true; video.autoplay = false;
+            renderMediaMessage("assistant", prompt, video, null);
+            await persistMessages([
+              { role: "user",      content: `/video ${prompt}` },
+              { role: "assistant", content: `[VIDEO_GENERATED: ${data.video}]` },
+            ]);
+          }
+        } catch {
+          spinGroup.remove();
+          renderSystemNote("⚠️ Network error during video generation.");
+        }
+
+        streaming = false;
+        sendBtn.disabled = !userInput.value.trim();
+        userInput.focus();
+      }
+
+      function renderSpinner(msg) {
+        hideWelcome();
+        const group = document.createElement("div");
+        group.className = "msg-group";
+        const row = document.createElement("div");
+        row.className = "msg-row assistant";
+        const av = document.createElement("div");
+        av.className = "avatar ai-av"; av.textContent = "✦";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble md";
+        bubble.innerHTML = `<div class="gen-spinner"><div class="gen-spinner-ring"></div><span>${msg}</span></div>`;
+        row.append(av, bubble);
+        group.appendChild(row);
+        chatWindow.appendChild(group);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+        return group;
+      }
 
       // ── Welcome card clicks ──────────────────────────────────────
       document.querySelectorAll(".fc").forEach((card) => {
@@ -1311,6 +1535,16 @@
       async function sendMessage() {
         const text = userInput.value.trim();
         if (!text || streaming) return;
+
+        // ── Intercept generation commands ──
+        if (text.startsWith("/image ")) {
+          const prompt = text.slice(7).trim();
+          if (prompt) { userInput.value = ""; return generateImage(prompt); }
+        }
+        if (text.startsWith("/video ")) {
+          const prompt = text.slice(7).trim();
+          if (prompt) { userInput.value = ""; return generateVideo(prompt); }
+        }
 
         streaming = true;
         userInput.value = "";

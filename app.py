@@ -81,6 +81,8 @@ def chat_stream():
                 stream=True,
             )
             for chunk in stream:
+                if not chunk.choices:
+                    continue
                 delta = chunk.choices[0].delta
                 if delta.content:
                     yield f"data: {json.dumps({'content': delta.content})}\n\n"
@@ -112,7 +114,11 @@ def chat():
 
     full_messages = build_messages(messages, pdf_text, system_prompt)
     response = client.chat.completions.create(model=model, messages=full_messages)
-    return jsonify({"reply": response.choices[0].message.content})
+    if response.choices:
+        reply = response.choices[0].message.content
+    else:
+        reply = "No response generated."
+    return jsonify({"reply": reply})
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 import os
 import io
-from flask import Flask, render_template, request, jsonify
+import json
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from openai import OpenAI
 from pypdf import PdfReader
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload limit
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
 @app.errorhandler(413)
 def too_large(e):
@@ -17,17 +18,33 @@ client = OpenAI(
 )
 
 MODELS = [
-    {"id": "gpt-4o",                        "label": "GPT-4o"},
-    {"id": "gpt-4o-mini",                   "label": "GPT-4o Mini"},
-    {"id": "Meta-Llama-3.1-70B-Instruct",   "label": "Llama 3.1 70B"},
-    {"id": "Meta-Llama-3.1-8B-Instruct",    "label": "Llama 3.1 8B"},
-    {"id": "Mistral-large",                 "label": "Mistral Large"},
-    {"id": "Mistral-small",                 "label": "Mistral Small"},
-    {"id": "Phi-3.5-mini-instruct",         "label": "Phi-3.5 Mini"},
-    {"id": "Cohere-command-r-plus",         "label": "Cohere Command R+"},
+    {"id": "gpt-4o",                       "label": "GPT-4o",          "tag": "Smart"},
+    {"id": "gpt-4o-mini",                  "label": "GPT-4o Mini",     "tag": "Fast"},
+    {"id": "Meta-Llama-3.1-70B-Instruct",  "label": "Llama 3.1 70B",  "tag": "Open"},
+    {"id": "Meta-Llama-3.1-8B-Instruct",   "label": "Llama 3.1 8B",   "tag": "Lite"},
+    {"id": "Mistral-large",                "label": "Mistral Large",   "tag": "EU"},
+    {"id": "Mistral-small",                "label": "Mistral Small",   "tag": "Lite"},
+    {"id": "Phi-3.5-mini-instruct",        "label": "Phi-3.5 Mini",   "tag": "Edge"},
+    {"id": "Cohere-command-r-plus",        "label": "Command R+",      "tag": "RAG"},
 ]
 
-MAX_PDF_CHARS = 12000  # keep context manageable
+MAX_PDF_CHARS = 12000
+
+
+def build_messages(messages, pdf_text, system_prompt=None):
+    full = []
+    if system_prompt:
+        full.append({"role": "system", "content": system_prompt})
+    if pdf_text:
+        full.append({
+            "role": "system",
+            "content": (
+                "The user has uploaded a PDF. Use its content to answer questions accurately.\n\n"
+                f"--- PDF CONTENT START ---\n{pdf_text}\n--- PDF CONTENT END ---"
+            ),
+        })
+    full.extend(messages)
+    return full
 
 
 @app.route("/")
@@ -35,69 +52,67 @@ def index():
     return render_template("index.html", models=MODELS)
 
 
-@app.route("/upload-pdf", methods=["POST"])
-def upload_pdf():
-    if "pdf" not in request.files:
-        return jsonify({"error": "No file provided."}), 400
+@app.route("/chat/stream", methods=["POST"])
+def chat_stream():
+    data = request.get_json()
+    messages     = data.get("messages", [])
+    model        = data.get("model", "gpt-4o-mini")
+    pdf_text     = data.get("pdf_text", "")
+    system_prompt = data.get("system_prompt", "")
 
-    file = request.files["pdf"]
-    if not file.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "Only PDF files are supported."}), 400
+    valid_ids = {m["id"] for m in MODELS}
+    if model not in valid_ids:
+        def err():
+            yield f"data: {json.dumps({'error': 'Invalid model.'})}\n\n"
+        return Response(stream_with_context(err()), content_type="text/event-stream")
 
-    try:
-        reader = PdfReader(io.BytesIO(file.read()))
-        text = "\n\n".join(
-            page.extract_text() or "" for page in reader.pages
-        ).strip()
+    if not messages:
+        def err():
+            yield f"data: {json.dumps({'error': 'No messages provided.'})}\n\n"
+        return Response(stream_with_context(err()), content_type="text/event-stream")
 
-        if not text:
-            return jsonify({"error": "Could not extract text from this PDF. It may be scanned/image-based."}), 422
+    full_messages = build_messages(messages, pdf_text, system_prompt)
 
-        truncated = len(text) > MAX_PDF_CHARS
-        text = text[:MAX_PDF_CHARS]
+    def generate():
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=full_messages,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield f"data: {json.dumps({'content': delta.content})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-        return jsonify({
-            "text": text,
-            "pages": len(reader.pages),
-            "truncated": truncated,
-            "filename": file.filename,
-        })
-    except Exception as e:
-        return jsonify({"error": f"Failed to read PDF: {str(e)}"}), 500
+    return Response(
+        stream_with_context(generate()),
+        content_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    """Non-streaming fallback."""
     data = request.get_json()
-    messages = data.get("messages", [])
-    model = data.get("model", "gpt-4o-mini")
-    pdf_text = data.get("pdf_text", "")
+    messages      = data.get("messages", [])
+    model         = data.get("model", "gpt-4o-mini")
+    pdf_text      = data.get("pdf_text", "")
+    system_prompt = data.get("system_prompt", "")
 
     valid_ids = {m["id"] for m in MODELS}
     if model not in valid_ids:
         return jsonify({"error": "Invalid model selected."}), 400
-
     if not messages:
         return jsonify({"error": "No messages provided."}), 400
 
-    full_messages = []
-    if pdf_text:
-        full_messages.append({
-            "role": "system",
-            "content": (
-                "The user has uploaded a PDF document. Use its content to answer questions.\n\n"
-                f"--- PDF CONTENT ---\n{pdf_text}\n--- END PDF CONTENT ---"
-            ),
-        })
-    full_messages.extend(messages)
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=full_messages,
-    )
-
-    reply = response.choices[0].message.content
-    return jsonify({"reply": reply})
+    full_messages = build_messages(messages, pdf_text, system_prompt)
+    response = client.chat.completions.create(model=model, messages=full_messages)
+    return jsonify({"reply": response.choices[0].message.content})
 
 
 if __name__ == "__main__":

@@ -5,7 +5,11 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB upload limit
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload limit
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({"error": "File too large. Please upload a PDF under 32 MB."}), 413
 
 client = OpenAI(
     base_url="https://models.inference.ai.azure.com",

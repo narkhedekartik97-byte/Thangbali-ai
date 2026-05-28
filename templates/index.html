@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>thangbali</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <style>
     :root {
       --bg:          #0f172a;
@@ -635,32 +636,56 @@
     return row;
   }
 
-  // ── PDF upload ────────────────────────────────────────────
+  // ── PDF upload (client-side via PDF.js — no binary upload to server) ───────
+  const PDFJS_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const MAX_PDF_CHARS = 12000;
+
   async function uploadPdf(file) {
     if (!file?.name.toLowerCase().endsWith(".pdf")) {
       renderMessage("system-note", "⚠️ Only PDF files are supported.");
       return;
     }
-    const note = renderMessage("system-note", `Uploading "${file.name}"…`);
-    const form = new FormData();
-    form.append("pdf", file);
+
+    const note = renderMessage("system-note", `📄 Reading "${file.name}"…`);
+
     try {
-      const res  = await fetch("/upload-pdf", { method: "POST", body: form });
-      const data = await res.json();
-      note.remove();
-      if (data.error) {
-        renderMessage("system-note", `⚠️ ${data.error}`);
-      } else {
-        pdfText = data.text;
-        pdfNameEl.textContent = data.filename;
-        pdfBadge.classList.add("visible");
-        let msg = `📄 "${data.filename}" loaded (${data.pages} page${data.pages !== 1 ? "s" : ""}).`;
-        if (data.truncated) msg += " Large file — first portion used.";
-        renderMessage("system-note", msg + " Ask me anything about it.");
+      // Set worker source
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pageCount = pdf.numPages;
+      let fullText = "";
+
+      for (let i = 1; i <= pageCount; i++) {
+        note.textContent = `📄 Reading page ${i} of ${pageCount}…`;
+        const page    = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const pageText = content.items.map(item => item.str).join(" ");
+        fullText += pageText + "\n\n";
+        if (fullText.length > MAX_PDF_CHARS) break;
       }
-    } catch {
+
+      fullText = fullText.trim();
+      if (!fullText) {
+        note.remove();
+        renderMessage("system-note", "⚠️ No text found. This PDF may be image-based or scanned.");
+        return;
+      }
+
+      const truncated = fullText.length > MAX_PDF_CHARS;
+      pdfText = fullText.slice(0, MAX_PDF_CHARS);
+      pdfNameEl.textContent = file.name;
+      pdfBadge.classList.add("visible");
       note.remove();
-      renderMessage("system-note", "⚠️ Network error uploading PDF.");
+
+      let msg = `📄 "${file.name}" loaded (${pageCount} page${pageCount !== 1 ? "s" : ""}).`;
+      if (truncated) msg += " Large file — first portion used.";
+      renderMessage("system-note", msg + " Ask me anything about it.");
+
+    } catch (err) {
+      note.remove();
+      renderMessage("system-note", `⚠️ Could not read PDF: ${err.message || "Unknown error"}`);
     }
   }
 

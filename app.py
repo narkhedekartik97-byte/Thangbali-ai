@@ -4,17 +4,14 @@ import json
 import uuid
 import time
 import sqlite3
-import requests as http_req
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, g
 from openai import OpenAI
 from pypdf import PdfReader
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "chat_history.db")
-STATIC_GEN = os.path.join(os.path.dirname(__file__), "static", "generated")
-os.makedirs(STATIC_GEN, exist_ok=True)
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -63,20 +60,17 @@ def init_db():
 init_db()
 
 
-# ── AI Clients ────────────────────────────────────────────────────────────────
+# ── OpenAI client ─────────────────────────────────────────────────────────────
 
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({"error": "File too large. Please upload a PDF under 32 MB."}), 413
 
 
-chat_client = OpenAI(
+client = OpenAI(
     base_url="https://models.inference.ai.azure.com",
     api_key=os.environ["GITHUB_TOKEN"],
 )
-
-_openai_key = os.environ.get("OPENAI_API_KEY", "")
-image_client = OpenAI(api_key=_openai_key) if _openai_key else None
 
 MODELS = [
     {"id": "gpt-4o",                       "label": "GPT-4o",         "tag": "Smart"},
@@ -207,88 +201,6 @@ def add_messages(sid):
     return jsonify({"ok": True, "count": len(msgs)}), 201
 
 
-# ── Image Generation ──────────────────────────────────────────────────────────
-
-@app.route("/generate/image", methods=["POST"])
-def generate_image():
-    if not image_client:
-        return jsonify({"error": "OPENAI_API_KEY is not configured."}), 500
-    data   = request.get_json(silent=True) or {}
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "Prompt is required."}), 400
-
-    size    = data.get("size", "1024x1024")
-    quality = data.get("quality", "standard")
-    style   = data.get("style", "vivid")
-    if size not in {"1024x1024", "1792x1024", "1024x1792"}:
-        size = "1024x1024"
-
-    try:
-        resp = image_client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            style=style,
-            response_format="b64_json",
-            n=1,
-        )
-        b64     = resp.data[0].b64_json
-        revised = resp.data[0].revised_prompt or prompt
-        return jsonify({"image": f"data:image/png;base64,{b64}", "revised_prompt": revised})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ── Video Generation ──────────────────────────────────────────────────────────
-
-@app.route("/generate/video", methods=["POST"])
-def generate_video():
-    data   = request.get_json(silent=True) or {}
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "Prompt is required."}), 400
-
-    HF_MODEL = "https://api-inference.huggingface.co/models/damo-vilab/text-to-video-ms-1.7b"
-    hf_token = os.environ.get("HF_TOKEN", "")
-    headers  = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
-
-    last_error = "Unknown error"
-    for attempt in range(6):
-        try:
-            resp = http_req.post(
-                HF_MODEL,
-                headers=headers,
-                json={"inputs": prompt},
-                timeout=120,
-            )
-            if resp.status_code == 200:
-                filename = f"video_{uuid.uuid4().hex[:8]}.mp4"
-                filepath = os.path.join(STATIC_GEN, filename)
-                with open(filepath, "wb") as f:
-                    f.write(resp.content)
-                return jsonify({"video": f"/static/generated/{filename}"})
-            elif resp.status_code == 503:
-                try:
-                    wait = float(resp.json().get("estimated_time", 20))
-                except Exception:
-                    wait = 20
-                time.sleep(min(wait, 30))
-            else:
-                try:
-                    last_error = resp.json().get("error", resp.text[:300])
-                except Exception:
-                    last_error = resp.text[:300]
-                break
-        except Exception as e:
-            last_error = str(e)
-            if attempt < 5:
-                time.sleep(5)
-
-    return jsonify({"error": f"Video generation failed: {last_error}"}), 500
-
-
 # ── Chat (streaming) ──────────────────────────────────────────────────────────
 
 @app.route("/chat/stream", methods=["POST"])
@@ -314,7 +226,7 @@ def chat_stream():
 
     def generate():
         try:
-            stream = chat_client.chat.completions.create(
+            stream = client.chat.completions.create(
                 model=model,
                 messages=full_messages,
                 stream=True,
@@ -353,7 +265,7 @@ def chat():
         return jsonify({"error": "No messages provided."}), 400
 
     full_messages = build_messages(messages, pdf_text, system_prompt)
-    response = chat_client.chat.completions.create(model=model, messages=full_messages)
+    response = client.chat.completions.create(model=model, messages=full_messages)
     if response.choices:
         reply = response.choices[0].message.content
     else:

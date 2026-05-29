@@ -35,3 +35,4 @@ localPort = 8081
 externalPort = 80
 
 [nix]
+packages = ["cacert", "freetype", "glibcLocales", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "mailutils", "openjpeg", "tcl", "tk", "zlib"]
